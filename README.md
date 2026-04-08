@@ -1,6 +1,6 @@
 # 🚚 SwiftChain Delivery Delay Prediction
 
-> **Live App →** [your-app-url.streamlit.app](https://adewale-swiftchain-delivery-prediction.streamlit.app/)
+> **Live App →** [Streamlit App](https://adewale-swiftchain-delivery-prediction.streamlit.app/)
 > *(Replace this link with your actual Streamlit URL after deployment)*
 
 ---
