@@ -14,6 +14,7 @@ import pandas as pd
 import numpy as np
 import joblib
 import os
+from pathlib import Path
 
 # ── Page Configuration ────────────────────────────────────────────────────────
 st.set_page_config(
@@ -179,8 +180,9 @@ def load_model_artifacts():
     Load the trained GradientBoostingClassifier and fitted StandardScaler.
     Both files must exist in the same directory as app.py.
     """
-    model_path  = "swiftchain_delay_predictor.pkl"
-    scaler_path = "swiftchain_scaler.pkl"
+    base_dir = Path(__file__).resolve().parent
+    model_path  = base_dir / "swiftchain_delay_predictor.pkl"
+    scaler_path = base_dir / "swiftchain_scaler.pkl"
 
     if not os.path.exists(model_path):
         return None, None, f"Model file not found: '{model_path}'"
@@ -366,204 +368,104 @@ predict_clicked = st.button("🔮  Predict Delivery Outcome", use_container_widt
 
 
 # ── Prediction & Risk Output ──────────────────────────────────────────────────
+def build_model_input(shipping_mode, shipping_duration, market,
+                      customer_segment, order_item_quantity, profit_per_order):
+    """Build the exact 309-column schema used by the saved model.
+
+    The public UI intentionally exposes only six operational inputs. Other
+    numeric fields are imputed with the training scaler means and other
+    categorical fields use their training reference category. This is a
+    transparent partial-information prediction, not a replacement for a
+    complete order-level feature record.
+    """
+    if model is None or scaler is None:
+        raise RuntimeError(load_error or "Model artifacts are unavailable")
+
+    feature_names = list(model.feature_names_in_)
+    numeric_names = list(scaler.feature_names_in_)
+    row = pd.DataFrame(0.0, index=[0], columns=feature_names)
+
+    # Start numeric features at their training means. After scaling, these
+    # become zero (the neutral value expected by the trained estimator).
+    for name, mean in zip(numeric_names, scaler.mean_):
+        if name in row.columns:
+            row.at[0, name] = float(mean)
+
+    supplied_numeric = {
+        "shipping_duration": shipping_duration,
+        "order_item_quantity": order_item_quantity,
+        "profit_per_order": profit_per_order,
+    }
+    for name, value in supplied_numeric.items():
+        if name in row.columns:
+            row.at[0, name] = float(value)
+
+    # One-hot columns use the same drop-first convention as training. The
+    # omitted categories are the reference levels (First Class, Africa,
+    # Consumer), so they correctly remain all-zero.
+    categorical_values = {
+        f"shipping_mode_{shipping_mode}": 1.0,
+        f"market_{market}": 1.0,
+        f"customer_segment_{customer_segment}": 1.0,
+    }
+    for name, value in categorical_values.items():
+        if name in row.columns:
+            row.at[0, name] = value
+
+    # Scale exactly the 15 numeric features and preserve the fitted order.
+    row[numeric_names] = scaler.transform(row[numeric_names])
+    return row
+
+
 if predict_clicked:
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown('<div class="section-header">Delivery Risk Assessment</div>',
+    st.markdown('<div class="section-header">ML Delivery Assessment</div>',
                 unsafe_allow_html=True)
 
-    # ── Shipping mode risk signal ─────────────────────────────────────────────
-    mode_data = {
-        "Standard Class": {
-            "late_pct": 38.1, "early_pct": 40.6, "ontime_pct": 21.3,
-            "risk": "HIGH",   "color": "red"
-        },
-        "Second Class": {
-            "late_pct": 0.3,  "early_pct": 76.8, "ontime_pct": 23.0,
-            "risk": "LOW",    "color": "green"
-        },
-        "First Class": {
-            "late_pct": 1.3,  "early_pct": 98.5, "ontime_pct": 0.2,
-            "risk": "MINIMAL","color": "green"
-        },
-        "Same Day": {
-            "late_pct": 4.2,  "early_pct": 53.1, "ontime_pct": 42.7,
-            "risk": "LOW",    "color": "green"
-        },
-    }
-    md = mode_data[shipping_mode]
-
-    # ── Compute risk level ────────────────────────────────────────────────────
-    is_high_risk    = (shipping_mode == "Standard Class" and shipping_duration > 7)
-    is_moderate     = (shipping_mode == "Standard Class" and shipping_duration <= 7)
-    is_low_dispatch = (shipping_duration <= 3)
-    is_high_dispatch= (shipping_duration > 7)
-
-    if is_high_risk:
-        result_class  = "result-late"
-        outcome_emoji = "🔴"
-        outcome_label = "HIGH LATE-DELIVERY RISK"
-        outcome_color = "#e74c3c"
-        summary_text  = (
-            f"This order combines <b>Standard Class</b> (38.1% historical late rate) "
-            f"with a dispatch lag of <b>{shipping_duration} days</b> — which exceeds the "
-            "recommended 3-day SLA. These are the two strongest predictors of late delivery, "
-            "jointly accounting for 85% of model learning. "
-            "<b>Recommended action:</b> Upgrade to Second Class or expedite dispatch immediately."
-        )
-    elif is_moderate:
-        result_class  = "result-ontime"
-        outcome_emoji = "🟡"
-        outcome_label = "MODERATE RISK"
-        outcome_color = "#f39c12"
-        summary_text  = (
-            f"<b>Standard Class</b> carries a 38.1% historical late-delivery rate — "
-            "nearly 2× the global average of 22.8%. The dispatch lag is within SLA, "
-            "which reduces (but does not eliminate) the risk. "
-            "<b>Recommended action:</b> Monitor fulfilment queue for this order."
-        )
+    if load_error or model is None or scaler is None:
+        st.error(f"The trained delivery model could not be loaded: {load_error}")
     else:
-        result_class  = "result-early"
-        outcome_emoji = "🟢"
-        outcome_label = "LOW RISK"
-        outcome_color = "#00c896"
-        summary_text  = (
-            f"<b>{shipping_mode}</b> has a {md['late_pct']}% historical late-delivery rate "
-            f"and delivers Early {md['early_pct']}% of the time. "
-            f"{'The dispatch lag is within SLA, further reducing risk. ' if is_low_dispatch else ''}"
-            "<b>Expected outcome:</b> On-Time or Early delivery."
-        )
+        try:
+            model_input = build_model_input(
+                shipping_mode, shipping_duration, market,
+                customer_segment, order_item_quantity, profit_per_order
+            )
+            predicted_class = int(model.predict(model_input)[0])
+            probabilities = model.predict_proba(model_input)[0]
+            class_probabilities = dict(zip(model.classes_, probabilities))
+            label_map = {-1: "Late", 0: "On-Time", 1: "Early"}
+            outcome_label = label_map.get(predicted_class, str(predicted_class))
+            confidence = float(class_probabilities[predicted_class])
 
-    st.markdown(f"""
-    <div class="{result_class}">
-        <div class="result-title" style='color:{outcome_color};'>
-            {outcome_emoji} {outcome_label}
-        </div>
-        <div class="result-subtitle">{summary_text}</div>
-    </div>
-    """, unsafe_allow_html=True)
+            if predicted_class == -1:
+                st.error(f"🔴 **Predicted outcome: {outcome_label}**")
+            elif predicted_class == 0:
+                st.warning(f"🟡 **Predicted outcome: {outcome_label}**")
+            else:
+                st.success(f"🟢 **Predicted outcome: {outcome_label}**")
 
-    # ── Breakdown panel ───────────────────────────────────────────────────────
-    b1, b2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Predicted outcome", outcome_label)
+            c2.metric("Model confidence", f"{confidence:.1%}")
+            c3.metric("Model features", str(len(model.feature_names_in_)))
 
-    with b1:
-        st.markdown('<div class="section-header">Shipping Mode History</div>',
-                    unsafe_allow_html=True)
-        pill_cls = "pill-red" if md["color"] == "red" else "pill-green"
-        st.markdown(f"""
-        <div class="metric-card" style='text-align:left;'>
-            <div style='margin-bottom:14px;'>
-                <span style='font-size:1.05rem; font-weight:600;'>{shipping_mode}</span>
-                <span class='insight-pill {pill_cls}' style='margin-left:8px;'>
-                    {md['risk']} RISK
-                </span>
-            </div>
-            <div class="stat-row">
-                <span class="stat-label">Late Rate</span>
-                <span class="stat-val" style='color:#e74c3c;'>{md['late_pct']}%</span>
-            </div>
-            <div class="stat-row">
-                <span class="stat-label">On-Time Rate</span>
-                <span class="stat-val" style='color:#f39c12;'>{md['ontime_pct']}%</span>
-            </div>
-            <div class="stat-row" style='border:none;'>
-                <span class="stat-label">Early Rate</span>
-                <span class="stat-val" style='color:#00c896;'>{md['early_pct']}%</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with b2:
-        st.markdown('<div class="section-header">Dispatch Lag Assessment</div>',
-                    unsafe_allow_html=True)
-        lag_color = "#e74c3c" if is_high_dispatch else ("#f39c12" if shipping_duration > 3 else "#00c896")
-        lag_status = "ABOVE SLA" if is_high_dispatch else ("BORDERLINE" if shipping_duration > 3 else "WITHIN SLA")
-        lag_pill   = "pill-red" if is_high_dispatch else ("pill-amber" if shipping_duration > 3 else "pill-green")
-        st.markdown(f"""
-        <div class="metric-card" style='text-align:left;'>
-            <div style='margin-bottom:14px;'>
-                <span style='font-size:1.05rem; font-weight:600;'>{shipping_duration} days</span>
-                <span class='insight-pill {lag_pill}' style='margin-left:8px;'>{lag_status}</span>
-            </div>
-            <div class="stat-row">
-                <span class="stat-label">Recommended SLA</span>
-                <span class="stat-val">≤ 3 days</span>
-            </div>
-            <div class="stat-row">
-                <span class="stat-label">Your Lag</span>
-                <span class="stat-val" style='color:{lag_color};'>{shipping_duration} days</span>
-            </div>
-            <div class="stat-row" style='border:none;'>
-                <span class="stat-label">Feature Importance</span>
-                <span class="stat-val" style='color:#00c896;'>17.94%</span>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # ── Market context strip ──────────────────────────────────────────────────
-    market_rates = {
-        "Europe": 23.57, "LATAM": 23.11, "Pacific Asia": 22.14,
-        "USCA": 21.98, "Africa": 21.88
-    }
-    sel_rate = market_rates[market]
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown('<div class="section-header">Market Context</div>',
-                unsafe_allow_html=True)
-    st.markdown(f"""
-    <div class="metric-card" style='text-align:left; padding:16px 24px;'>
-        <div style='font-size:0.86rem; color:#8b949e; margin-bottom:12px;'>
-            Late-delivery rates are remarkably consistent across all five markets —
-            within ±1.7 pp of the global 22.8% average. Market alone is not a
-            meaningful standalone predictor.
-        </div>
-        <div style='display:flex; gap:32px; flex-wrap:wrap;'>
-            {''.join([
-                f'<div style="text-align:center;">'
-                f'<div style="font-family:Space Mono,monospace; font-size:1.1rem; '
-                f'color:{"#00c896" if m == market else "#e6edf3"}; font-weight:{"700" if m == market else "400"};">'
-                f'{r}%</div>'
-                f'<div style="font-size:0.7rem; color:#8b949e; margin-top:2px;">{m}</div>'
-                f'</div>'
-                for m, r in market_rates.items()
-            ])}
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ── Key insight callout ───────────────────────────────────────────────────
-    if shipping_mode == "Standard Class":
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("""
-        <div style='background:rgba(231,76,60,0.08); border:1px solid rgba(231,76,60,0.25);
-                    border-radius:10px; padding:16px 20px; font-size:0.87rem; line-height:1.7;'>
-            <b style='color:#e74c3c;'>💡 Actionable Insight —</b>
-            Shifting 10% of Standard Class orders (~910 orders) to Second Class
-            could prevent approximately <b>347 late deliveries per period</b>.
-            Second Class has only a 0.3% late rate — the safest upgrade path
-            from Standard Class.
-        </div>
-        """, unsafe_allow_html=True)
-
-    # ── Model caption ─────────────────────────────────────────────────────────
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.caption(
-        "Model: Tuned GradientBoostingClassifier  ·  "
-        "Best params: lr=0.01, max_depth=3, n_estimators=200  ·  "
-        "Test Accuracy: 62.0%  ·  Weighted F1: 0.5791  ·  "
-        "5-fold CV F1: 0.5768 ± 0.0091  ·  "
-        "Training data: 15,549 logistics orders (2015–2018)"
-    )
-
-elif load_error:
-    st.error(f"⚠️ Could not load model artifacts: {load_error}")
-    st.markdown("""
-    **Make sure these two files are in the same folder as `app.py`:**
-    - `swiftchain_delay_predictor.pkl`
-    - `swiftchain_scaler.pkl`
-
-    Download them from the Colab notebook (Files panel → right-click → Download),
-    then upload them to your GitHub repository root.
-    """)
-
+            probability_table = pd.DataFrame({
+                "Outcome": [label_map.get(int(c), str(c)) for c in model.classes_],
+                "Probability": [float(p) for p in probabilities],
+            })
+            st.dataframe(
+                probability_table.style.format({"Probability": "{:.1%}"}),
+                hide_index=True,
+                use_container_width=True,
+            )
+            st.info(
+                "This prediction uses the six fields shown above. Uncollected "
+                "order, customer, product and location fields are imputed at "
+                "their training reference values. For production use, pass the "
+                "complete 41-field order record through a persisted preprocessing pipeline."
+            )
+        except Exception as exc:
+            st.error(f"Prediction failed because the input schema does not match the artifact: {exc}")
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.markdown("<br><br>", unsafe_allow_html=True)
