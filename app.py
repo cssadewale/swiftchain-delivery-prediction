@@ -192,9 +192,31 @@ def load_model_artifacts():
     try:
         model  = joblib.load(model_path)
         scaler = joblib.load(scaler_path)
+
+        # Fail early with a useful message if someone uploads mismatched
+        # artifacts. The model was trained on 309 columns and the scaler on
+        # the 15 numeric columns listed in scaler.feature_names_in_.
+        if not hasattr(model, "feature_names_in_"):
+            raise ValueError("The model artifact has no feature_names_in_ metadata")
+        if not hasattr(scaler, "feature_names_in_"):
+            raise ValueError("The scaler artifact has no feature_names_in_ metadata")
+        missing_numeric = [
+            col for col in scaler.feature_names_in_
+            if col not in model.feature_names_in_
+        ]
+        if missing_numeric:
+            raise ValueError(
+                "Scaler columns missing from model schema: "
+                + ", ".join(missing_numeric)
+            )
+        if len(model.feature_names_in_) != 309:
+            raise ValueError(
+                f"Unexpected model schema: expected 309 features, "
+                f"found {len(model.feature_names_in_)}"
+            )
         return model, scaler, None
     except Exception as e:
-        return None, None, str(e)
+        return None, None, f"{type(e).__name__}: {e}"
 
 model, scaler, load_error = load_model_artifacts()
 
