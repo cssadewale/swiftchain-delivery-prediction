@@ -30,3 +30,7 @@ swiftchain_scaler.pkl
 ```
 
 The `.pkl` files must remain beside `app.py`.
+
+## Streamlit Cloud startup fix
+
+If Streamlit Cloud uses Python 3.14, dependency installation may stall while resolving/building scientific packages. `runtime.txt` pins the deployment to Python 3.12 and `requirements.txt` pins a compatible binary-wheel stack.
